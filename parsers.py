@@ -15,14 +15,17 @@ def _to_float(value: str) -> float:
 
 def parse_csv(file_path: str) -> pd.DataFrame:
     """Detect CSV format by inspecting the first line, then dispatch."""
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+    # utf-8-sig strips BOM if present (common in Windows/IB exports)
+    with open(file_path, 'r', encoding='utf-8-sig', errors='replace') as f:
         first_line = f.readline()
 
-    # IB statements always start with "Statement,"
     if first_line.startswith("Statement,"):
         return parse_ib_csv(file_path)
 
-    return pd.read_csv(file_path)
+    try:
+        return pd.read_csv(file_path)
+    except Exception:
+        return parse_ib_csv(file_path)
 
 
 def parse_ib_csv(file_path: str) -> pd.DataFrame:
