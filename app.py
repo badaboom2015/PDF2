@@ -87,6 +87,8 @@ def upload():
             "num_positions": stats["num_positions"],
             "top_5": stats["top_5"],
             "concentration_warnings": stats["concentration_risk"]["warnings"],
+            "concentration_risk": stats["concentration_risk"],
+            "asset_breakdown": stats["asset_breakdown"],
             "ai_comment": ai_comment,
             "positions": df_with_weights[
                 ["name", "ticker", "quantity", "current_price", "current_value", "weight_pct", "asset_type"]

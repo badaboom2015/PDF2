@@ -2,97 +2,112 @@ import pandas as pd
 import pdfplumber
 import re
 import csv
-from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
+
+
+def _to_float(value: str) -> float:
+    """Convert a string number (possibly with thousands commas) to float."""
+    try:
+        return float(str(value).replace(',', ''))
+    except (ValueError, AttributeError):
+        return 0.0
 
 
 def parse_csv(file_path: str) -> pd.DataFrame:
-    """
-    Parse CSV file with portfolio data.
-    Handles Interactive Brokers statement format with multiple sections.
-    """
-    positions = []
-    
-    try:
-        # Try parsing as standard CSV first
-        df = pd.read_csv(file_path, nrows=5)
-        if len(df.columns) > 4:
-            # Likely IB format, parse specially
-            return parse_ib_csv(file_path)
-        else:
-            return df
-    except Exception:
-        # Fall back to IB format parsing
+    """Detect CSV format by inspecting the first line, then dispatch."""
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        first_line = f.readline()
+
+    # IB statements always start with "Statement,"
+    if first_line.startswith("Statement,"):
         return parse_ib_csv(file_path)
+
+    return pd.read_csv(file_path)
 
 
 def parse_ib_csv(file_path: str) -> pd.DataFrame:
     """
-    Parse Interactive Brokers statement CSV format.
-    Extracts "Offene Positionen" section.
+    Parse Interactive Brokers statement CSV (German locale), two-pass.
+
+    Devisenpositionen columns (0-indexed):
+      0 Section  1 RowType  2 Category  3 BaseCurrency  4 FxCurrency
+      5 Amount   6 EntryRate 7 CostBasisEUR  8 CloseRate  9 ValueEUR
+
+    Offene Positionen columns (0-indexed):
+      0 Section  1 RowType  2 Discriminator  3 AssetClass  4 Currency
+      5 Symbol   6 Quantity  7 Multiplier  8 EntryPrice  9 CostBasis
+      10 ClosePrice  11 Value
     """
-    positions = []
-    in_open_positions = False
-    
-    with open(file_path, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if not row:
+    positions: List[Dict] = []
+    fx_rates: Dict[str, float] = {}  # currency → EUR conversion factor
+
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        rows = list(csv.reader(f))
+
+    # ── Pass 1: collect FX rates from Devisenpositionen ──────────────────────
+    in_fx = False
+    for row in rows:
+        if not row:
+            continue
+        if row[0] == "Devisenpositionen":
+            if len(row) > 1 and row[1] == "Header":
+                in_fx = True
                 continue
-            
-            # Check if we're entering open positions section
-            if len(row) > 0 and row[0] == "Offene Positionen":
-                if len(row) > 1 and row[1] == "Header":
-                    in_open_positions = True
-                    continue
-                
-                if in_open_positions and len(row) > 1:
-                    # Row format: [Section, Type, Discriminator, AssetClass, Currency, Symbol, Qty, ...]
-                    row_type = row[1] if len(row) > 1 else ""
-                    
-                    # Skip headers and totals
-                    if row_type == "Data" and len(row) > 6:
-                        try:
-                            discriminator = row[2] if len(row) > 2 else ""
-                            asset_class = row[3] if len(row) > 3 else ""
-                            currency = row[4] if len(row) > 4 else ""
-                            symbol = row[5] if len(row) > 5 else ""
-                            
-                            # Skip discriminator/summary rows or section headers
-                            if discriminator == "Summary" and symbol:
-                                quantity = pd.to_numeric(row[6], errors='coerce') if len(row) > 6 else 0
-                                entry_price = pd.to_numeric(row[8], errors='coerce') if len(row) > 8 else 0
-                                close_price = pd.to_numeric(row[10], errors='coerce') if len(row) > 10 else 0
-                                value = pd.to_numeric(row[11], errors='coerce') if len(row) > 11 else 0
-                                
-                                if quantity != 0 or value != 0:  # Only valid positions
-                                    positions.append({
-                                        'name': f"{symbol} {asset_class}",
-                                        'ticker': symbol,
-                                        'quantity': quantity,
-                                        'current_price': close_price if close_price > 0 else entry_price,
-                                        'current_value': value,
-                                        'asset_type': 'Option' if asset_class.lower() == 'optionen' else 'Aktie',
-                                        'currency': currency,
-                                    })
-                        except (ValueError, IndexError):
-                            pass
-                    
-                    elif row_type == "Total" or row_type == "SubTotal":
-                        # End of section, still in positions but stop processing
-                        pass
-            
-            # End of positions section when we hit another main section
-            elif in_open_positions and len(row) > 0 and row[0] and row[0] not in ["Offene Positionen", ""]:
-                if row[0] in ["Devisenpositionen", "Transaktionen", "Dividenden"]:
-                    in_open_positions = False
-    
-    df = pd.DataFrame(positions)
-    if df.empty:
-        # Return empty dataframe with correct columns
-        df = pd.DataFrame(columns=['name', 'ticker', 'quantity', 'current_price', 'current_value', 'asset_type'])
-    
-    return df
+            if in_fx and len(row) > 8 and row[1] == "Data":
+                currency = row[4].strip()          # e.g. "USD"
+                rate = _to_float(row[8])            # Schlusskurs = EUR per 1 unit
+                if currency and currency != "EUR" and rate != 0.0:
+                    fx_rates[currency] = rate
+        elif in_fx:
+            in_fx = False                           # any new section ends fx block
+
+    # ── Pass 2: parse Offene Positionen ──────────────────────────────────────
+    in_pos = False
+    for row in rows:
+        if not row:
+            continue
+        if row[0] == "Offene Positionen":
+            row_type = row[1] if len(row) > 1 else ""
+            if row_type == "Header":
+                in_pos = True
+                continue
+            if not in_pos or row_type != "Data" or len(row) < 12:
+                continue
+            if row[2] != "Summary" or not row[5].strip():
+                continue
+
+            symbol = row[5].strip()
+            asset_class = row[3].strip()
+            currency = row[4].strip()
+
+            quantity = _to_float(row[6])
+            entry_price = _to_float(row[8])
+            close_price = _to_float(row[10])
+            value = _to_float(row[11])
+
+            if quantity == 0.0 and value == 0.0:
+                continue
+
+            fx = fx_rates.get(currency, 1.0) if currency != "EUR" else 1.0
+            is_option = asset_class.lower() in ("optionen", "options", "option")
+
+            positions.append({
+                'name': symbol,
+                'ticker': symbol,
+                'quantity': quantity,
+                'current_price': round((close_price if close_price != 0.0 else entry_price) * fx, 4),
+                'current_value': round(value * fx, 2),
+                'asset_type': "Option" if is_option else "Aktie",
+                'currency': currency,
+            })
+        elif in_pos:
+            in_pos = False                          # any new section ends positions block
+
+    if not positions:
+        return pd.DataFrame(
+            columns=['name', 'ticker', 'quantity', 'current_price', 'current_value', 'asset_type']
+        )
+    return pd.DataFrame(positions)
 
 
 def extract_text_from_pdf(file_path: str) -> str:

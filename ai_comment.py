@@ -1,66 +1,50 @@
-"""
-Simple AI commentary using a lightweight open-source model.
-Uses transformers/pipeline for zero-shot or summarization tasks.
-"""
-
 from typing import Dict, List
+import pandas as pd
 
 
-def generate_portfolio_comment(
-    stats: Dict,
-    df_positions,
-    concentration_risk: Dict
-) -> str:
-    """
-    Generate a simple educational comment about the portfolio.
-    No investment advice, just educational observations.
-    """
+def generate_portfolio_comment(stats: Dict, df_positions: pd.DataFrame, concentration_risk: Dict) -> str:
+    """Generate an educational portfolio commentary in German. No investment advice."""
     total_value = stats["total_value"]
     num_positions = stats["num_positions"]
-    top_5_pct = concentration_risk.get("top_5_pct", 0)
+    top5_pct = concentration_risk.get("top_5_pct", 0)
+    max_single = concentration_risk.get("max_single_pct", 0)
+    usa_tech = concentration_risk.get("usa_tech_pct", 0)
     warnings = concentration_risk.get("warnings", [])
-    
-    # Build observation text
-    observations = []
-    
-    observations.append(
-        f"Das Portfolio hat einen Gesamtwert von {total_value:,.2f} EUR "
-        f"mit {num_positions} Positionen."
+    asset_breakdown: Dict = stats.get("asset_breakdown", {})
+
+    lines: List[str] = []
+
+    lines.append(
+        f"Das Portfolio umfasst {num_positions} Positionen mit einem Gesamtwert von "
+        f"{total_value:,.2f} EUR."
     )
-    
-    if top_5_pct > 0:
-        observations.append(
-            f"Die Top-5-Positionen machen {top_5_pct}% des Portfolios aus."
+
+    if asset_breakdown:
+        breakdown_text = ", ".join(
+            f"{atype} {pct}%" for atype, pct in sorted(asset_breakdown.items(), key=lambda x: -x[1])
         )
-    
+        lines.append(f"Asset-Mix: {breakdown_text}.")
+
+    if top5_pct > 0:
+        lines.append(f"Die Top‑5 Positionen binden {top5_pct}% des Depotvermögens.")
+
+    if max_single > 15:
+        lines.append(
+            f"Die größte Einzelposition macht {max_single}% aus – "
+            "das übersteigt die übliche Faustregel von 15% je Position."
+        )
+
+    if usa_tech > 30:
+        lines.append(
+            f"Rund {usa_tech}% des Portfolios entfallen auf US-amerikanische oder Tech-Werte. "
+            "Währungs- und Sektorrisiken sind zu beachten."
+        )
+
     if warnings:
-        observations.append("Hinweise auf Konzentration: " + "; ".join(warnings))
-    
-    # Asset type breakdown (simple stats)
-    if "asset_type" in df_positions.columns:
-        asset_counts = df_positions["asset_type"].value_counts().to_dict()
-        type_text = ", ".join([f"{k}: {v}" for k, v in asset_counts.items()])
-        observations.append(f"Asset-Typen: {type_text}")
-    
-    observations.append(
-        "Dies ist eine reine Analyse ohne Anlageberatung. "
-        "Für konkrete Entscheidungen konsultieren Sie einen Fachberater."
+        lines.append("Weitere Hinweise: " + "; ".join(warnings) + ".")
+
+    lines.append(
+        "Diese Auswertung dient ausschließlich der Information und stellt keine Anlageberatung dar."
     )
-    
-    return " ".join(observations)
 
-
-def simple_summary_with_transformers(comment: str) -> str:
-    """
-    Optional: use transformers summarization pipeline for further processing.
-    Falls back to original comment if model not available.
-    """
-    try:
-        from transformers import pipeline
-        
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-        summary = summarizer(comment, max_length=100, min_length=50, do_sample=False)
-        return summary[0]["summary_text"]
-    except Exception as e:
-        print(f"Summarization not available: {e}")
-        return comment
+    return " ".join(lines)
