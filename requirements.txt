@@ -1,15 +1,6 @@
 flask
+werkzeug
 pandas
 pdfplumber
-spacy
-scikit-learn
-sentence-transformers
-transformers
-torch
-tqdm
-python-magic
 openpyxl
-werkzeug
-
-# For local small open-source model use; user can adjust
-# If GPU available, install appropriate torch build
+gunicorn
